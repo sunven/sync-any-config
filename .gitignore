@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-ssr/
+.gstack/
+*.local
+.env
+.env.local
+.DS_Store
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+*.log
