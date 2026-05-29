@@ -78,13 +78,25 @@ sync-any-config://auth/callback?code=...
 
 copy the full URL from the browser address bar and paste it into the desktop app's callback input.
 
+## UI Components
+
+The frontend uses shadcn/ui-style primitives in `src/components/ui` and product-specific presentation components in `src/components/app`.
+
+- Keep `src/components/ui` limited to reusable primitives generated or adapted from shadcn/ui.
+- Keep Tauri, Supabase, file-store, and sync-adapter side effects in `App.tsx` or app-level helpers.
+- Presentation components should receive typed props and callbacks instead of importing side-effect modules directly. ESLint enforces this for `src/components/app` and `src/components/ui`.
+- Tailwind v4 is wired through `@tailwindcss/vite`; theme tokens live at the top of `src/index.css`.
+
 ## Verification
 
 ```bash
 pnpm lint
 pnpm test
+pnpm test:ui
 pnpm test:supabase
 pnpm exec tsc --noEmit
+pnpm build:dummy
+pnpm verify:ui
 VITE_SUPABASE_URL=http://localhost:54321 VITE_SUPABASE_ANON_KEY=dummy pnpm build
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml

@@ -1,25 +1,22 @@
 import type { Session, User } from '@supabase/supabase-js'
+import type { HealthCheckStatus, ObservedLocalState } from '@/components/app/presentation'
 import type { ArchivedFileListItem, ConflictSnapshot, RemoteFileListItem, RevisionListItem } from '@/lib/sync-adapters/supabase-sync-store'
 import type { ConfigPreset } from '@/lib/sync-core/presets'
-import type { SyncStatus, TrackedFileView } from '@/lib/sync-core/types'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { confirm, open, save } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { AlertTriangle, Archive, Check, CheckCircle2, Cloud, Columns2, Download, FilePlus2, FolderOpen, GitBranch, GitMerge, Link2, ListPlus, LogOut, Pause, Pencil, Play, RefreshCw, RotateCcw, ToggleLeft, ToggleRight, Trash2, Undo2, Unlink, UploadCloud, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentUser, handleOAuthCallback, hasSupabaseConfig, signInWithGoogle, signOut, supabase } from '@/auth/oauth-service'
-import { PlaintextWarning } from '@/components/PlaintextWarning'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
+import { AppView } from '@/components/app/AppView'
+import { toViewFile } from '@/components/app/presentation'
 import { getDeviceId, getDeviceLabel, getPlatform } from '@/lib/sync-adapters/device-store'
 import { atomicWriteTextWithBackup, localPathExists, makeLocalTextFile, readLocalTextFile } from '@/lib/sync-adapters/local-file-store'
 import { archiveTrackedFile, createConflict, createRevisionIfCurrent, createTrackedFile, fetchOpenConflict, fetchRemoteHead, fetchRevision, findTrackedFileByCanonicalKey, listArchivedTrackedFiles, listFileRevisions, listTrackedFiles, renameTrackedFile, resolveConflict, restoreArchivedTrackedFile, setFileLocationAutoUploadEnabled, setFileLocationWatchEnabled, unlinkFileLocation, updateFileLocationAfterApply, upsertDevice, upsertFileLocation } from '@/lib/sync-adapters/supabase-sync-store'
 import { decideUpload, detectObviousSecrets } from '@/lib/sync-core/decisions'
 import { basenameFromPath, formatFromPath } from '@/lib/sync-core/file-metadata'
 import { CONFIG_PRESETS, detectPresetPlatform, presetPathForPlatform } from '@/lib/sync-core/presets'
-import { decideDisplayStatus } from '@/lib/sync-core/status'
 
 const CONFIG_FILE_FILTERS = [
   {
@@ -32,64 +29,11 @@ const CONFIG_FILE_FILTERS = [
   },
 ]
 
-function statusLabel(status: SyncStatus) {
-  switch (status) {
-    case 'idle':
-      return '已同步'
-    case 'local_changed':
-      return '待上传'
-    case 'remote_changed':
-      return '待下载'
-    case 'checking_remote':
-      return '检查中'
-    case 'uploading':
-      return '上传中'
-    case 'downloading':
-      return '下载中'
-    case 'conflict':
-      return '冲突'
-    case 'paused':
-      return '已暂停'
-    case 'error':
-      return '需处理'
-    case 'unlinked':
-      return '未链接'
-  }
-}
-
-function healthStatusLabel(status: HealthCheckStatus) {
-  switch (status) {
-    case 'ok':
-      return '正常'
-    case 'unlinked':
-      return '未链接'
-    case 'paused':
-      return '已暂停'
-    case 'missing':
-      return '文件缺失'
-    case 'read_error':
-      return '读取失败'
-    case 'local_changed':
-      return '本机已变'
-    case 'remote_changed':
-      return '云端已变'
-    case 'conflict':
-      return '冲突'
-  }
-}
-
-interface ObservedLocalState {
-  hash: string | null
-  readOk: boolean
-}
-
 interface LocalUploadResult {
   type: 'uploaded' | 'unchanged' | 'blocked' | 'conflict'
   revisionId?: string
   reason?: string
 }
-
-type HealthCheckStatus = 'ok' | 'unlinked' | 'paused' | 'missing' | 'read_error' | 'local_changed' | 'remote_changed' | 'conflict'
 
 interface HealthCheckResult {
   fileId: string
@@ -115,20 +59,6 @@ interface AppEnv {
   USERPROFILE?: string
 }
 
-function formatDate(value: string | null) {
-  if (!value) {
-    return '尚未同步'
-  }
-  return new Date(value).toLocaleString()
-}
-
-function formatBytes(value: number) {
-  if (value < 1024) {
-    return `${value} B`
-  }
-  return `${(value / 1024).toFixed(1)} KB`
-}
-
 function buildDefaultMergeText(localText: string, remoteText: string) {
   if (localText === remoteText) {
     return localText
@@ -141,36 +71,6 @@ function buildDefaultMergeText(localText: string, remoteText: string) {
     remoteText,
     '>>>>>>> 云端',
   ].join('\n')
-}
-
-function previewLines(text: string, maxLines = 80) {
-  const lines = text.split(/\r?\n/)
-  const visible = lines.slice(0, maxLines)
-  if (lines.length > maxLines) {
-    visible.push(`... 还有 ${lines.length - maxLines} 行`)
-  }
-  return visible.join('\n')
-}
-
-function toViewFile(file: RemoteFileListItem, observed?: ObservedLocalState): TrackedFileView {
-  return {
-    id: file.id,
-    displayName: file.displayName,
-    localPath: file.localPath,
-    status: decideDisplayStatus({
-      hasOpenConflict: file.openConflictCount > 0,
-      paused: file.paused,
-      watchEnabled: file.watchEnabled,
-      hasLocalPath: Boolean(file.localPath),
-      currentRevisionId: file.currentRevisionId,
-      lastAppliedRevisionId: file.lastAppliedRevisionId,
-      storedLocalHash: file.localHash,
-      observedLocalHash: observed?.hash,
-      localReadOk: observed?.readOk,
-    }),
-    updatedAt: file.updatedAt,
-    revision: file.currentRevisionId ? file.currentRevisionId.slice(0, 8) : '未初始化',
-  }
 }
 
 function actionErrorMessage(error: unknown) {
@@ -1296,6 +1196,13 @@ export function App() {
     setSelectedId(file.id)
   })
 
+  const handleRestoreArchivedFileById = (fileId: string) => {
+    const file = archivedFiles.find(candidate => candidate.id === fileId)
+    if (file) {
+      void handleRestoreArchivedFile(file)
+    }
+  }
+
   const handleSyncNow = () => runAction(async () => {
     ensureSignedIn()
     if (!selectedFile) {
@@ -1402,6 +1309,22 @@ export function App() {
     await loadFiles()
     await loadRevisions(selectedFile.id, { quiet: true })
   })
+
+  const handleRestoreRevisionById = (revisionId: string) => {
+    const revision = revisions.find(candidate => candidate.id === revisionId)
+    if (revision) {
+      void handleRestoreRevision(revision)
+    }
+  }
+
+  const handleConflictMergedTextChange = (value: string) => {
+    setConflictDetail(current => current
+      ? {
+          ...current,
+          mergedContentText: value,
+        }
+      : current)
+  }
 
   const handleLoadConflictDetail = () => runAction(async () => {
     ensureSignedIn()
@@ -1553,488 +1476,65 @@ export function App() {
   })
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark" aria-hidden="true" />
-          <div>
-            <h1>Sync Any Config</h1>
-            <p>多设备同步配置文件</p>
-          </div>
-        </div>
-        <div className="account-strip">
-          <Badge variant="secondary">{user?.email ?? '未登录'}</Badge>
-          {user
-            ? (
-                <Button variant="outline" disabled={isAuthBusy} onClick={handleSignOut}>
-                  <LogOut size={16} />
-                  退出登录
-                </Button>
-              )
-            : (
-                <Button variant="outline" disabled={!hasSupabaseConfig || isAuthBusy} onClick={handleSignIn}>
-                  <Cloud size={16} />
-                  使用 Google 登录
-                </Button>
-              )}
-        </div>
-      </header>
-
-      {!hasSupabaseConfig && (
-        <section className="inline-error" role="alert">
-          缺少 Supabase 配置。请在 `.env.local` 设置 VITE_SUPABASE_URL 和 VITE_SUPABASE_ANON_KEY。
-        </section>
-      )}
-
-      {authError && (
-        <section className="inline-error" role="alert">
-          {authError}
-        </section>
-      )}
-
-      {isTauri() && !user && isAwaitingDesktopCallback && (
-        <section className="manual-callback" aria-label="桌面登录回调">
-          <div className="manual-callback-icon">
-            <Link2 size={18} />
-          </div>
-          <div className="manual-callback-body">
-            <h2>等待浏览器登录回调</h2>
-            <p>如果浏览器停在 sync-any-config://auth/callback 页面，把地址栏里的完整 URL 粘贴到这里完成开发模式登录。</p>
-            <div className="manual-callback-row">
-              <input
-                aria-label="登录回调 URL"
-                placeholder="sync-any-config://auth/callback?code=..."
-                value={manualCallbackUrl}
-                onChange={event => setManualCallbackUrl(event.target.value)}
-              />
-              <Button disabled={isActionBusy || !manualCallbackUrl.trim()} onClick={handleManualCallback}>
-                完成登录
-              </Button>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {actionError && (
-        <section className="inline-error" role="alert">
-          {actionError}
-        </section>
-      )}
-
-      {notice && (
-        <section className="inline-notice" role="status">
-          {notice}
-        </section>
-      )}
-
-      <PlaintextWarning />
-
-      <section className="workspace">
-        <aside className="sidebar">
-          <Button className="full-width" disabled={!user || isActionBusy} onClick={handleAddFile}>
-            <FilePlus2 size={16} />
-            添加配置文件
-          </Button>
-          <Button className="full-width preset-toggle" variant="outline" disabled={!user || isActionBusy} onClick={() => setShowPresets(current => !current)}>
-            <ListPlus size={16} />
-            添加常用配置
-          </Button>
-          <Button className="full-width preset-toggle" variant="outline" disabled={!user || isActionBusy || isHealthChecking} onClick={handleRunHealthCheck}>
-            <CheckCircle2 size={16} />
-            {isHealthChecking ? '检查中' : '健康检查'}
-          </Button>
-          <Button
-            className="full-width preset-toggle"
-            variant="outline"
-            disabled={!user || isActionBusy}
-            onClick={() => {
-              const nextShowArchivedFiles = !showArchivedFiles
-              setShowArchivedFiles(nextShowArchivedFiles)
-              if (nextShowArchivedFiles) {
-                void loadArchivedFiles()
-              }
-            }}
-          >
-            <Archive size={16} />
-            {showArchivedFiles ? '隐藏归档文件' : '查看归档文件'}
-          </Button>
-
-          {showPresets && (
-            <section className="preset-panel" aria-label="常用配置">
-              {CONFIG_PRESETS.map(preset => (
-                <button
-                  key={preset.key}
-                  className="preset-row"
-                  type="button"
-                  disabled={isActionBusy}
-                  onClick={() => handleAddPreset(preset)}
-                >
-                  <strong>{preset.label}</strong>
-                  <span>{preset.description}</span>
-                  <small>{preset.fileName}</small>
-                </button>
-              ))}
-            </section>
-          )}
-
-          {healthResults.length > 0 && (
-            <section className="health-panel" aria-label="健康检查结果">
-              <div className="health-heading">
-                <strong>健康检查</strong>
-                <span>{formatDate(healthCheckedAt)}</span>
-              </div>
-              <div className="health-list">
-                {healthResults.map(result => (
-                  <button
-                    key={result.fileId}
-                    className="health-row"
-                    type="button"
-                    onClick={() => setSelectedId(result.fileId)}
-                  >
-                    <span>
-                      <strong>{result.displayName}</strong>
-                      <small>{result.detail}</small>
-                    </span>
-                    <Badge variant={result.status === 'ok' || result.status === 'paused' ? 'secondary' : 'destructive'}>
-                      {healthStatusLabel(result.status)}
-                    </Badge>
-                  </button>
-                ))}
-              </div>
-            </section>
-          )}
-
-          {showArchivedFiles && (
-            <section className="archived-panel" aria-label="归档文件">
-              <div className="health-heading">
-                <strong>归档文件</strong>
-                <Button variant="ghost" disabled={isLoadingArchivedFiles} onClick={() => void loadArchivedFiles()}>
-                  <RefreshCw size={14} />
-                  刷新
-                </Button>
-              </div>
-              <div className="archived-list">
-                {isLoadingArchivedFiles && (
-                  <div className="empty-state">正在加载归档文件...</div>
-                )}
-                {!isLoadingArchivedFiles && archivedFiles.length === 0 && (
-                  <div className="empty-state">没有归档文件。</div>
-                )}
-                {!isLoadingArchivedFiles && archivedFiles.map(file => (
-                  <article key={file.id} className="archived-row">
-                    <span>
-                      <strong>{file.displayName}</strong>
-                      <small>{`归档于 ${formatDate(file.deletedAt)}`}</small>
-                    </span>
-                    <Button variant="outline" disabled={isActionBusy} onClick={() => handleRestoreArchivedFile(file)}>
-                      <Undo2 size={16} />
-                      恢复
-                    </Button>
-                  </article>
-                ))}
-              </div>
-            </section>
-          )}
-
-          <div className="file-list">
-            {isLoadingFiles && (
-              <div className="empty-state">正在加载云端文件...</div>
-            )}
-            {!isLoadingFiles && viewFiles.length === 0 && (
-              <div className="empty-state">
-                {user ? '还没有同步文件。先添加一个本机配置文件。' : '登录后查看同步文件。'}
-              </div>
-            )}
-            {viewFiles.map(file => (
-              <button
-                key={file.id}
-                className={file.id === selectedViewFile?.id ? 'file-row active' : 'file-row'}
-                type="button"
-                onClick={() => setSelectedId(file.id)}
-              >
-                <span>
-                  <strong>{file.displayName}</strong>
-                  <small>{file.localPath ?? '这台设备尚未选择路径'}</small>
-                </span>
-                <Badge variant={file.status === 'conflict' || file.status === 'error' ? 'destructive' : 'secondary'}>
-                  {statusLabel(file.status)}
-                </Badge>
-              </button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="content-pane">
-          {selectedFile && selectedViewFile
-            ? (
-                <>
-                  <div className="file-heading">
-                    <div>
-                      <h2>{selectedFile.displayName}</h2>
-                      <p>{selectedFile.localPath ?? '选择这台设备上的保存路径后开始同步'}</p>
-                    </div>
-                    <Badge variant={selectedViewFile.status === 'conflict' ? 'destructive' : 'secondary'}>
-                      {selectedViewFile.revision}
-                    </Badge>
-                  </div>
-
-                  <div className="action-row">
-                    <Button disabled={isActionBusy} onClick={handleSyncNow}>
-                      <RefreshCw size={16} />
-                      立即同步
-                    </Button>
-                    <Button variant="outline" disabled={isActionBusy} onClick={handleLinkLocalPath}>
-                      <FolderOpen size={16} />
-                      选择本机路径
-                    </Button>
-                    {selectedFile.localPath && (
-                      <Button variant="outline" disabled={isActionBusy} onClick={handleToggleWatch}>
-                        {selectedFile.watchEnabled ? <Pause size={16} /> : <Play size={16} />}
-                        {selectedFile.watchEnabled ? '暂停检测' : '恢复检测'}
-                      </Button>
-                    )}
-                    {selectedFile.localPath && (
-                      <Button variant="outline" disabled={isActionBusy || !selectedFile.watchEnabled} onClick={handleToggleAutoUpload}>
-                        {selectedFile.autoUploadEnabled ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
-                        {selectedFile.autoUploadEnabled ? '关闭自动上传' : '开启自动上传'}
-                      </Button>
-                    )}
-                    {selectedFile.localPath && (
-                      <Button variant="ghost" disabled={isActionBusy} onClick={handleUnlinkLocalPath}>
-                        <Unlink size={16} />
-                        取消本机路径
-                      </Button>
-                    )}
-                    <Button variant="ghost" disabled={!user || isLoadingFiles} onClick={() => void loadFiles()}>
-                      <Cloud size={16} />
-                      刷新
-                    </Button>
-                  </div>
-
-                  <p className="status-check">
-                    {lastStatusCheckAt
-                      ? `上次自动检测：${formatDate(lastStatusCheckAt)}。自动上传${selectedFile.autoUploadEnabled ? '已开启' : '未开启'}。`
-                      : '自动检测将在后台运行；自动上传默认关闭。'}
-                  </p>
-
-                  {selectedViewFile.status === 'conflict' && (
-                    <section className="conflict-panel" aria-label="冲突处理">
-                      <div>
-                        <GitMerge size={20} />
-                      </div>
-                      <div className="conflict-panel-body">
-                        <h3>本机和云端都改过</h3>
-                        <p>自动同步已暂停，避免覆盖任一端内容。选择一个版本作为新的云端基线后，这台设备会继续同步。</p>
-                        <div className="conflict-actions">
-                          <Button variant="outline" disabled={isActionBusy || !selectedFile.localPath} onClick={handleUseRemote}>
-                            <Download size={16} />
-                            用云端覆盖本机
-                          </Button>
-                          <Button disabled={isActionBusy || !selectedFile.localPath} onClick={handleKeepLocal}>
-                            <UploadCloud size={16} />
-                            保留本机并上传
-                          </Button>
-                          <Button variant="outline" disabled={isActionBusy || isLoadingConflictDetail || !selectedFile.localPath} onClick={handleLoadConflictDetail}>
-                            <Columns2 size={16} />
-                            {isLoadingConflictDetail ? '加载中' : '查看差异'}
-                          </Button>
-                        </div>
-
-                        {activeConflictDetail && (
-                          <section className="conflict-detail" aria-label="冲突详情">
-                            <div className="diff-grid">
-                              <article>
-                                <h4>本机版本</h4>
-                                <pre>{previewLines(activeConflictDetail.conflict.localContentText)}</pre>
-                              </article>
-                              <article>
-                                <h4>云端版本</h4>
-                                <pre>{previewLines(activeConflictDetail.remoteContentText)}</pre>
-                              </article>
-                            </div>
-
-                            <label className="merge-editor">
-                              <span>合并后的内容</span>
-                              <textarea
-                                value={activeConflictDetail.mergedContentText}
-                                onChange={event => setConflictDetail(current => current
-                                  ? {
-                                      ...current,
-                                      mergedContentText: event.target.value,
-                                    }
-                                  : current)}
-                              />
-                            </label>
-
-                            <div className="conflict-actions">
-                              <Button disabled={isActionBusy || !activeConflictDetail.mergedContentText.trim()} onClick={handleManualMerge}>
-                                <GitMerge size={16} />
-                                保存合并并上传
-                              </Button>
-                              <Button variant="ghost" disabled={isActionBusy} onClick={() => setConflictDetail(null)}>
-                                <X size={16} />
-                                关闭详情
-                              </Button>
-                            </div>
-                          </section>
-                        )}
-                      </div>
-                    </section>
-                  )}
-
-                  <div className="state-grid">
-                    <article>
-                      <CheckCircle2 size={20} />
-                      <h3>同步状态</h3>
-                      <p>{statusLabel(selectedViewFile.status)}</p>
-                    </article>
-                    <article>
-                      <Cloud size={20} />
-                      <h3>上次更新</h3>
-                      <p>{formatDate(selectedFile.updatedAt)}</p>
-                    </article>
-                    <article>
-                      <AlertTriangle size={20} />
-                      <h3>保护规则</h3>
-                      <p>{selectedFile.autoUploadEnabled ? '只自动上传本机变化，不自动覆盖下载。' : '远端状态未知时不会自动上传。'}</p>
-                    </article>
-                  </div>
-
-                  <div className="detail-grid">
-                    <article>
-                      <UploadCloud size={18} />
-                      <div>
-                        <h3>云端文件</h3>
-                        <p>{selectedFile.currentRevisionId ?? '还没有 revision'}</p>
-                      </div>
-                    </article>
-                    <article>
-                      <Download size={18} />
-                      <div>
-                        <h3>本机应用点</h3>
-                        <p>{selectedFile.lastAppliedRevisionId ?? '这台设备还没有应用过云端版本'}</p>
-                      </div>
-                    </article>
-                  </div>
-
-                  <section className="cloud-management" aria-label="云端管理">
-                    <div className="section-heading">
-                      <div>
-                        <h3>云端管理</h3>
-                        <p>这些操作影响云端记录；归档不会删除任何本机文件。</p>
-                      </div>
-                      <Cloud size={18} />
-                    </div>
-
-                    <div className="management-row">
-                      {isRenamingFile
-                        ? (
-                            <div className="rename-row">
-                              <input
-                                aria-label="云端文件名"
-                                value={renameValue}
-                                onChange={event => setRenameValue(event.target.value)}
-                                onKeyDown={(event) => {
-                                  if (event.key === 'Enter') {
-                                    void handleSaveRename()
-                                  }
-                                  if (event.key === 'Escape') {
-                                    setRenamingFileId(null)
-                                    setRenameValue(selectedFile.displayName)
-                                  }
-                                }}
-                              />
-                              <Button disabled={isActionBusy || !renameValue.trim()} onClick={handleSaveRename}>
-                                <Check size={16} />
-                                保存
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                disabled={isActionBusy}
-                                onClick={() => {
-                                  setRenamingFileId(null)
-                                  setRenameValue(selectedFile.displayName)
-                                }}
-                              >
-                                <X size={16} />
-                                取消
-                              </Button>
-                            </div>
-                          )
-                        : (
-                            <Button
-                              variant="outline"
-                              disabled={isActionBusy}
-                              onClick={() => {
-                                setRenamingFileId(selectedFile.id)
-                                setRenameValue(selectedFile.displayName)
-                              }}
-                            >
-                              <Pencil size={16} />
-                              重命名云端文件
-                            </Button>
-                          )}
-
-                      <Button variant="ghost" disabled={isActionBusy} onClick={handleArchiveFile}>
-                        <Trash2 size={16} />
-                        归档云端文件
-                      </Button>
-                    </div>
-                  </section>
-
-                  <section className="revision-section" aria-label="最近版本">
-                    <div className="section-heading">
-                      <div>
-                        <h3>最近版本</h3>
-                        <p>恢复历史版本会创建一个新的云端版本，不会改写旧记录。</p>
-                      </div>
-                      <GitBranch size={18} />
-                    </div>
-
-                    {isLoadingRevisions && (
-                      <div className="revision-empty">正在加载版本...</div>
-                    )}
-
-                    {!isLoadingRevisions && revisions.length === 0 && (
-                      <div className="revision-empty">还没有历史版本。</div>
-                    )}
-
-                    {!isLoadingRevisions && revisions.length > 0 && (
-                      <div className="revision-list">
-                        {revisions.map(revision => (
-                          <article key={revision.id} className="revision-row">
-                            <div className="revision-meta">
-                              <strong>{revision.id.slice(0, 8)}</strong>
-                              <span>
-                                {`${formatDate(revision.createdAt)} · ${formatBytes(revision.byteSize)}`}
-                              </span>
-                              <small>
-                                {`${revision.message ?? '无说明'} · ${revision.contentHash.slice(0, 12)}`}
-                              </small>
-                            </div>
-                            <Button
-                              variant="outline"
-                              disabled={isActionBusy || revision.id === selectedFile.currentRevisionId}
-                              onClick={() => handleRestoreRevision(revision)}
-                            >
-                              <RotateCcw size={16} />
-                              {revision.id === selectedFile.currentRevisionId ? '当前版本' : '恢复'}
-                            </Button>
-                          </article>
-                        ))}
-                      </div>
-                    )}
-                  </section>
-                </>
-              )
-            : (
-                <div className="empty-content">
-                  <h2>{user ? '添加第一个配置文件' : '先登录 Google'}</h2>
-                  <p>{user ? '选择一个 json、yml、toml 或其他文本配置文件，内容会明文存到 Supabase。' : '登录后可以查看和同步你的配置文件。'}</p>
-                </div>
-              )}
-        </section>
-      </section>
-    </main>
+    <AppView
+      isSignedIn={Boolean(user)}
+      userEmail={user?.email ?? null}
+      hasSupabaseConfig={hasSupabaseConfig}
+      authError={authError}
+      actionError={actionError}
+      notice={notice}
+      isAuthBusy={isAuthBusy}
+      isActionBusy={isActionBusy}
+      isDesktopCallbackVisible={isTauri() && !user && isAwaitingDesktopCallback}
+      manualCallbackUrl={manualCallbackUrl}
+      setManualCallbackUrl={setManualCallbackUrl}
+      presets={CONFIG_PRESETS}
+      showPresets={showPresets}
+      setShowPresets={setShowPresets}
+      showArchivedFiles={showArchivedFiles}
+      setShowArchivedFiles={setShowArchivedFiles}
+      isLoadingFiles={isLoadingFiles}
+      isLoadingArchivedFiles={isLoadingArchivedFiles}
+      isLoadingRevisions={isLoadingRevisions}
+      isHealthChecking={isHealthChecking}
+      healthResults={healthResults}
+      healthCheckedAt={healthCheckedAt}
+      archivedFiles={archivedFiles}
+      viewFiles={viewFiles}
+      selectedFile={selectedFile}
+      selectedViewFile={selectedViewFile}
+      lastStatusCheckAt={lastStatusCheckAt}
+      isRenamingFile={isRenamingFile}
+      renameValue={renameValue}
+      setRenameValue={setRenameValue}
+      setRenamingFileId={setRenamingFileId}
+      activeConflictDetail={activeConflictDetail}
+      onConflictMergedTextChange={handleConflictMergedTextChange}
+      onCloseConflictDetail={() => setConflictDetail(null)}
+      isLoadingConflictDetail={isLoadingConflictDetail}
+      revisions={revisions}
+      onSignIn={() => void handleSignIn()}
+      onSignOut={() => void handleSignOut()}
+      onManualCallback={() => void handleManualCallback()}
+      onAddFile={() => void handleAddFile()}
+      onAddPreset={handleAddPreset}
+      onRunHealthCheck={() => void handleRunHealthCheck()}
+      onLoadArchivedFiles={() => void loadArchivedFiles()}
+      onRestoreArchivedFile={handleRestoreArchivedFileById}
+      onSelectFile={setSelectedId}
+      onLoadFiles={() => void loadFiles()}
+      onSyncNow={() => void handleSyncNow()}
+      onLinkLocalPath={() => void handleLinkLocalPath()}
+      onToggleWatch={() => void handleToggleWatch()}
+      onToggleAutoUpload={() => void handleToggleAutoUpload()}
+      onUnlinkLocalPath={() => void handleUnlinkLocalPath()}
+      onUseRemote={() => void handleUseRemote()}
+      onKeepLocal={() => void handleKeepLocal()}
+      onLoadConflictDetail={() => void handleLoadConflictDetail()}
+      onManualMerge={() => void handleManualMerge()}
+      onSaveRename={() => void handleSaveRename()}
+      onArchiveFile={() => void handleArchiveFile()}
+      onRestoreRevision={handleRestoreRevisionById}
+    />
   )
 }

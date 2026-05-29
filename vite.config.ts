@@ -1,5 +1,6 @@
 import path from 'node:path'
 import process from 'node:process'
+import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { loadEnv } from 'vite'
 import { defineConfig } from 'vitest/config'
@@ -21,7 +22,7 @@ export default defineConfig(async ({ command, mode }) => {
   }
 
   return {
-    plugins: [react()],
+    plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),

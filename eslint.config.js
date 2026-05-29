@@ -12,4 +12,15 @@ export default antfu({
     'src-tauri/Cargo.toml',
     'tsconfig*.json',
   ],
+}, {
+  files: ['src/components/app/**/*.{ts,tsx}', 'src/components/ui/**/*.{ts,tsx}'],
+  rules: {
+    'no-restricted-imports': ['error', {
+      patterns: [
+        '@tauri-apps/*',
+        '@/auth/*',
+        '@/lib/sync-adapters/*',
+      ],
+    }],
+  },
 })
